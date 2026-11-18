@@ -56,7 +56,6 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
     val registration: StateFlow<RegistrationState> get() = glasses.registration
 
     init {
-        glasses.initialize()
         viewModelScope.launch {
             glasses.events.collect { event ->
                 handle(

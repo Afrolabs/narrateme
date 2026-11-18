@@ -73,12 +73,6 @@ class GlassesSession(
     private var mockGlasses: MockGlasses? = null
     private val jobs = mutableListOf<Job>()
 
-    fun initialize() {
-        Wearables.initialize(context).onFailure { error, _ ->
-            _status.value = "Toolkit init failed: $error"
-        }
-    }
-
     fun register(activity: Activity) = Wearables.startRegistration(activity)
 
     fun enableMock(enabled: Boolean) {
