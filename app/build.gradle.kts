@@ -29,6 +29,8 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // OpenCV and the toolkit's fbjni both bundle the NDK C++ runtime; keep one copy.
+        jniLibs.pickFirsts += "lib/*/libc++_shared.so"
     }
 }
 
