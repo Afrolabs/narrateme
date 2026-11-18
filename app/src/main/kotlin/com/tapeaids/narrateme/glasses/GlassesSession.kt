@@ -6,10 +6,10 @@ import android.net.Uri
 import android.util.Log
 import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.addCamera
-import com.meta.wearable.dat.camera.photo.types.PhotoError
-import com.meta.wearable.dat.camera.photo.types.PhotoQuality
-import com.meta.wearable.dat.camera.photo.types.PhotoResolution
-import com.meta.wearable.dat.camera.photo.types.PhotoState
+import com.meta.wearable.dat.camera.types.PhotoData
+import com.meta.wearable.dat.camera.types.StreamConfiguration
+import com.meta.wearable.dat.camera.types.StreamState
+import com.meta.wearable.dat.camera.types.VideoQuality
 import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
@@ -44,7 +44,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayOutputStream
 import java.io.File
+import android.graphics.Bitmap
 
 /** What the glasses tell the app. */
 sealed interface GlassesEvent {
@@ -113,7 +115,7 @@ class GlassesSession(
     private var camera: Camera? = null
     private var mockGlasses: MockGlasses? = null
     private val jobs = mutableListOf<Job>()
-    private var photoAttempts = 0
+    private var photoJob: Job? = null
 
     fun register(activity: Activity) = Wearables.startRegistration(activity)
 
@@ -139,7 +141,10 @@ class GlassesSession(
         glasses.powerOn()
         glasses.don()
         glasses.unfold()
-        glasses.services.cameraCapture.setCapturedPhoto(Uri.fromFile(samplePhotoFile()))
+        val sample = Uri.fromFile(samplePhotoFile())
+        glasses.services.cameraCapture.setCapturedPhoto(sample)
+        runCatching { glasses.services.camera.setCapturedImage(sample) }
+            .onFailure { Log.w(TAG, "Mock stream photo not set", it) }
         mockGlasses = glasses
         _status.value = "Mock glasses paired"
     }
@@ -229,62 +234,86 @@ class GlassesSession(
     }
 
     private fun startCamera(s: DeviceSession) {
-        val cam = s.addCamera().getOrElse {
+        // Only the Stream child is used. Touching camera.photo would start the Photo child,
+        // which can't run alongside a stream and returned CAPTURE_FAILURE on Oakley Meta.
+        val cam = s.addCamera(STREAM_CONFIG).getOrElse {
             _status.value = "Camera unavailable: ${it.message}"
             return
         }
         camera = cam
-        // Subscribe before the photo child starts, as Meta's docs recommend.
-        val photo = cam.photo
+        watchStreamErrors(cam)
+    }
+
+    private fun watchStreamErrors(cam: Camera) {
         jobs += scope.launch {
-            photo.photoStream.collect {
-                Log.i(TAG, "Photo received: ${it.imageData.size} bytes after ${photoAttempts} attempt(s)")
-                photoAttempts = 0
-                _events.emit(GlassesEvent.PhotoTaken(it.imageData))
-            }
-        }
-        jobs += scope.launch {
-            photo.errors.collect { error ->
-                Log.w(TAG, "Photo error ${error.name} on attempt $photoAttempts")
-                if (error in RETRYABLE_PHOTO_ERRORS && photoAttempts < MAX_PHOTO_ATTEMPTS) {
-                    // A glasses capture-button press can also start the glasses' own capture,
-                    // which keeps the camera busy for a moment. Back off and try again.
-                    _status.value = "Photo attempt $photoAttempts failed (${error.name}), retrying…"
-                    delay(PHOTO_RETRY_MS * photoAttempts)
-                    requestPhoto(photo)
-                } else {
-                    photoAttempts = 0
-                    _events.emit(GlassesEvent.PhotoFailed("${error.name}: ${error.description}"))
-                }
+            cam.stream.errorStream.collect { error ->
+                Log.w(TAG, "Stream error: $error")
+                _status.value = "Camera stream error: $error"
             }
         }
     }
 
-    /** Requests one full-resolution photo; the result arrives on [events]. */
+    /**
+     * Takes one photo by briefly starting the video stream and capturing a frame at
+     * full sensor resolution. The stream is stopped again so the glasses' Bluetooth
+     * audio is free for recording. The result arrives on [events].
+     */
     fun capturePhoto() {
-        val photo = camera?.photo
-        if (photo == null) {
+        val s = session
+        if (s == null || camera == null) {
             _events.tryEmit(GlassesEvent.PhotoFailed("Glasses not connected"))
             return
         }
-        scope.launch {
-            // The photo child starts lazily on first access; give it a moment before failing.
-            val ready = withTimeoutOrNull(PHOTO_READY_TIMEOUT_MS) {
-                photo.state.first { it == PhotoState.STARTED }
-            }
-            if (ready == null) {
-                _events.emit(GlassesEvent.PhotoFailed("Camera not ready (photo state ${photo.state.value})"))
-            } else {
-                photoAttempts = 0
-                requestPhoto(photo)
-            }
+        if (photoJob?.isActive == true) return
+        photoJob = scope.launch {
+            val event = runCatching { captureFromStream(s) }
+                .getOrElse { GlassesEvent.PhotoFailed("Photo crashed: ${it.message}") }
+            _events.emit(event)
         }
     }
 
-    private fun requestPhoto(photo: com.meta.wearable.dat.camera.photo.Photo) {
-        photoAttempts++
-        Log.i(TAG, "Requesting photo, attempt $photoAttempts")
-        photo.capturePhoto(PhotoResolution.FULL, PhotoQuality.HIGH)
+    private suspend fun captureFromStream(s: DeviceSession): GlassesEvent {
+        var stream = camera?.stream ?: return GlassesEvent.PhotoFailed("Glasses not connected")
+        if (stream.state.value != StreamState.STREAMING) {
+            var started = stream.start()
+            if (started.errorOrNull() != null) {
+                // A stopped stream may not restart; rebuild the camera once and retry.
+                Log.w(TAG, "Stream start failed (${started.errorOrNull()}), recreating camera")
+                s.removeCamera()
+                camera = null
+                startCamera(s)
+                stream = camera?.stream ?: return GlassesEvent.PhotoFailed("Camera unavailable")
+                started = stream.start()
+            }
+            started.errorOrNull()?.let { return GlassesEvent.PhotoFailed("Camera stream didn't start: $it") }
+            _status.value = "Starting camera…"
+            val streaming = withTimeoutOrNull(STREAM_START_TIMEOUT_MS) {
+                stream.state.first { it == StreamState.STREAMING }
+            }
+            if (streaming == null) {
+                val state = stream.state.value
+                stream.stop()
+                return GlassesEvent.PhotoFailed("Camera stream not ready (state $state)")
+            }
+        }
+        val result = stream.capturePhoto()
+        stream.stop()
+        _status.value = "Connected"
+        val data = result.getOrNull()
+            ?: return GlassesEvent.PhotoFailed("Photo failed: ${result.errorOrNull()}")
+        val bytes = when (data) {
+            is PhotoData.Bitmap -> ByteArrayOutputStream().use { out ->
+                data.bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+                out.toByteArray()
+            }
+            is PhotoData.HEIC -> data.data.duplicate().let { buf ->
+                buf.rewind()
+                ByteArray(buf.remaining()).also { buf.get(it) }
+            }
+            else -> return GlassesEvent.PhotoFailed("Unknown photo format: $data")
+        }
+        Log.i(TAG, "Photo received: ${bytes.size} bytes ($data)")
+        return GlassesEvent.PhotoTaken(bytes)
     }
 
     /** On-screen stand-ins for the glasses buttons. In mock mode they go through the mock device. */
@@ -307,6 +336,8 @@ class GlassesSession(
     }
 
     fun disconnect() {
+        photoJob?.cancel()
+        photoJob = null
         jobs.forEach { it.cancel() }
         jobs.clear()
         session?.let { s ->
@@ -332,11 +363,10 @@ class GlassesSession(
     private companion object {
         const val TAG = "GlassesSession"
         const val CONNECT_TIMEOUT_MS = 15_000L
-        const val PHOTO_READY_TIMEOUT_MS = 5_000L
+        const val STREAM_START_TIMEOUT_MS = 10_000L
+        const val JPEG_QUALITY = 92
+        val STREAM_CONFIG = StreamConfiguration(videoQuality = VideoQuality.HIGH)
         const val DEVICE_WAIT_MS = 10_000L
-        const val MAX_PHOTO_ATTEMPTS = 3
-        const val PHOTO_RETRY_MS = 1_500L
-        val RETRYABLE_PHOTO_ERRORS = setOf(PhotoError.CAPTURE_FAILURE, PhotoError.BUSY, PhotoError.NOT_READY)
         const val DEVICE_POLL_MS = 1_000L
     }
 }
