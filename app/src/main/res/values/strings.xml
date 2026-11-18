@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">narrateme</string>
-    <string name="mwdat_application_id" translatable="false">0</string>
-    <string name="mwdat_client_token" translatable="false">0</string>
 </resources>

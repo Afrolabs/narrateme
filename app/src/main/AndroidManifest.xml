@@ -13,11 +13,9 @@
         android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
-        <!-- Developer Mode: Meta's docs allow 0 for both until the app is registered for publishing.
-             They go through string resources because a bare "0" is stored as an integer,
-             which the toolkit can't read as a string. -->
-        <meta-data android:name="com.meta.wearable.mwdat.APPLICATION_ID" android:value="@string/mwdat_application_id" />
-        <meta-data android:name="com.meta.wearable.mwdat.CLIENT_TOKEN" android:value="@string/mwdat_client_token" />
+        <!-- Developer Mode: Meta's docs allow 0 for both until the app is registered for publishing. -->
+        <meta-data android:name="com.meta.wearable.mwdat.APPLICATION_ID" android:value="0" />
+        <meta-data android:name="com.meta.wearable.mwdat.CLIENT_TOKEN" android:value="0" />
 
         <activity
             android:name=".MainActivity"
