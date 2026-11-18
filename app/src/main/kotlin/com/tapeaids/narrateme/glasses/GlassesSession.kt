@@ -13,6 +13,7 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
+import com.meta.wearable.dat.core.types.Device
 import com.meta.wearable.dat.core.types.RegistrationState
 import com.meta.wearable.dat.inputs.addInputs
 import com.meta.wearable.dat.inputs.types.ButtonType
@@ -29,6 +30,8 @@ import com.meta.wearable.dat.camera.removeCamera
 import com.tapeaids.narrateme.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -68,6 +71,25 @@ class GlassesSession(
 
     val registration: StateFlow<RegistrationState> get() = Wearables.registrationState
 
+    private val _devices = MutableStateFlow<List<String>>(emptyList())
+    /** One line per glasses the toolkit knows about, for diagnosing "no eligible device". */
+    val devices: StateFlow<List<String>> = _devices.asStateFlow()
+
+    init {
+        scope.launch {
+            while (isActive) {
+                _devices.value = knownDevices().map { it.describe() }
+                delay(DEVICE_POLL_MS)
+            }
+        }
+    }
+
+    private fun knownDevices(): List<Device> =
+        Wearables.devices.value.mapNotNull { Wearables.devicesMetadata[it]?.value }
+
+    private fun Device.describe() =
+        "$name: link $linkState, ${compatibility.displayString}, worn $donState, hinge $hingeState"
+
     private var session: DeviceSession? = null
     private var camera: Camera? = null
     private var mockGlasses: MockGlasses? = null
@@ -97,9 +119,26 @@ class GlassesSession(
     fun connect() {
         if (session != null) return
         scope.launch {
+            if (mockGlasses == null && Wearables.registrationState.value != RegistrationState.REGISTERED) {
+                _status.value = "Not registered yet: tap Register and approve narrateme in the Meta AI app"
+                return@launch
+            }
+            _status.value = "Looking for glasses…"
+            // The device list fills in asynchronously after start-up, so give it a moment.
+            val found = withTimeoutOrNull(DEVICE_WAIT_MS) {
+                while (knownDevices().isEmpty()) delay(DEVICE_POLL_MS)
+                true
+            }
+            if (found == null) {
+                _status.value = "No glasses visible to the toolkit. Check they're paired in Meta AI, " +
+                    "switched on and unfolded, and that narrateme is registered."
+                return@launch
+            }
             _status.value = "Connecting…"
-            val s = Wearables.createSession(AutoDeviceSelector()).getOrElse {
-                _status.value = "No glasses: ${it.message}"
+            val result = Wearables.createSession(AutoDeviceSelector())
+            val s = result.getOrNull() ?: run {
+                _status.value = "Couldn't start a session: ${result.errorOrNull()}. Seen: " +
+                    knownDevices().joinToString { it.describe() }
                 return@launch
             }
             session = s
@@ -229,5 +268,7 @@ class GlassesSession(
         const val TAG = "GlassesSession"
         const val CONNECT_TIMEOUT_MS = 15_000L
         const val PHOTO_READY_TIMEOUT_MS = 5_000L
+        const val DEVICE_WAIT_MS = 10_000L
+        const val DEVICE_POLL_MS = 1_000L
     }
 }

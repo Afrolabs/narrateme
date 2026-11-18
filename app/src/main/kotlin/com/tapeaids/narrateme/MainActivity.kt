@@ -92,6 +92,7 @@ private fun Screen(vm: NarrateViewModel, onRegister: () -> Unit, onCameraPermiss
     val registration by vm.registration.collectAsStateWithLifecycle()
     val status by vm.glasses.status.collectAsStateWithLifecycle()
     val connected by vm.glasses.connected.collectAsStateWithLifecycle()
+    val devices by vm.glasses.devices.collectAsStateWithLifecycle()
     val idle = ui.state == State.Idle
 
     Column(
@@ -110,6 +111,11 @@ private fun Screen(vm: NarrateViewModel, onRegister: () -> Unit, onCameraPermiss
 
         Text("Registration: $registration")
         Text("Glasses: $status")
+        if (devices.isEmpty()) {
+            Text("Devices: none seen yet", style = MaterialTheme.typography.bodySmall)
+        } else {
+            devices.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (registration != RegistrationState.REGISTERED && !ui.useMock) {
                 Button(onClick = onRegister) { Text("Register") }
