@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -66,6 +66,7 @@ class MainActivity : ComponentActivity() {
                         onRegister = { vm.register(this) },
                         onUpdate = { vm.glasses.openUpdate(this, it) },
                         onCameraPermission = { glassesCameraPermission.launch(Permission.CAMERA) },
+                        onClearPages = vm::clearPages,
                     )
                 }
             }
@@ -94,6 +95,7 @@ private fun Screen(
     onRegister: () -> Unit,
     onUpdate: (GlassesUpdate) -> Unit,
     onCameraPermission: () -> Unit,
+    onClearPages: () -> Unit,
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val registration by vm.registration.collectAsStateWithLifecycle()
@@ -161,17 +163,33 @@ private fun Screen(
             OutlinedButton(onClick = vm::pressAction) { Text("Action") }
         }
 
+        if (ui.lastMatch.isNotEmpty()) Text(ui.lastMatch, style = MaterialTheme.typography.bodySmall)
+
         Spacer(Modifier.height(8.dp))
-        Text("Stored page", style = MaterialTheme.typography.labelLarge)
-        val photo = ui.pagePhoto
-        if (photo == null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Saved pages (${ui.pages.size})", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+            OutlinedButton(onClick = onClearPages, enabled = idle && ui.pages.isNotEmpty()) { Text("Clear all") }
+        }
+        if (ui.pages.isEmpty()) {
             Text("None yet. Narrate a page first.")
         } else {
-            Image(
-                bitmap = photo.asImageBitmap(),
-                contentDescription = "Photo of the narrated page",
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ui.pages.forEach { page ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        page.bitmap?.let {
+                            Image(
+                                bitmap = it.asImageBitmap(),
+                                contentDescription = "Photo of ${page.label}",
+                                modifier = Modifier.height(140.dp),
+                            )
+                        }
+                        Text(page.label, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
         }
     }
 }
@@ -179,6 +197,7 @@ private fun Screen(
 private fun State.label() = when (this) {
     State.Idle -> "Ready"
     State.TakingPhoto -> "Taking photo"
+    State.Matching -> "Finding page"
     is State.Recording -> "Recording narration"
     is State.Playing -> "Playing narration"
 }

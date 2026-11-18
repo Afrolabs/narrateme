@@ -3,17 +3,20 @@ package com.tapeaids.narrateme.core
 import java.io.File
 
 /** A narrated page: the narrator's photo of it and their recording. */
-data class Page(val photo: File, val audio: File)
+data class Page(val id: String, val photo: File, val audio: File)
 
-/** Decides which stored page, if any, a new photo shows. */
-fun interface PageMatcher {
-    fun match(photo: ByteArray): Page?
-}
+/** How well a new photo matched one stored page. Higher is better; 0 means no match. */
+data class PageScore(val page: Page, val score: Int)
 
 /**
- * Placeholder for page recognition: there is only ever one page, so any photo
- * matches it. Replace with real image matching later.
+ * Picks the page a photo shows from per-page scores, or null if none is convincing.
+ * The best score must reach [minScore] and beat the runner-up by [margin]x, so that
+ * two similar pages don't produce a coin-flip.
  */
-class SinglePageMatcher(private val store: PageStore) : PageMatcher {
-    override fun match(photo: ByteArray): Page? = store.load()
+fun pickMatch(scores: List<PageScore>, minScore: Int = 25, margin: Double = 1.5): Page? {
+    val sorted = scores.sortedByDescending { it.score }
+    val best = sorted.firstOrNull() ?: return null
+    if (best.score < minScore) return null
+    val runnerUp = sorted.getOrNull(1)?.score ?: 0
+    return if (best.score >= runnerUp * margin) best.page else null
 }

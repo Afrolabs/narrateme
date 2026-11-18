@@ -15,7 +15,9 @@ android {
         minSdk = 29 // Meta Wearables DAT 1.0.1 requires Android 10+
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.2.0"
+        // OpenCV's native libraries are large; ship phones (arm64) and the CI emulator (x86_64) only.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     buildFeatures { compose = true }
@@ -42,6 +44,9 @@ dependencies {
     implementation(libs.mwdat.inputs)
     // Mock Device Kit runs in-app (not test-only), so the prototype can be tried without glasses.
     implementation(libs.mwdat.mockdevice)
+
+    // Page recognition: ORB keypoints + homography check, on the phone, offline.
+    implementation(libs.opencv)
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(platform(libs.compose.bom))

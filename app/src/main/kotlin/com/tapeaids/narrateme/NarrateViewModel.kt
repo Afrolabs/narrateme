@@ -7,20 +7,21 @@ import android.graphics.BitmapFactory
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.meta.wearable.dat.core.types.RegistrationState
-import com.tapeaids.narrateme.audio.Beeper
 import com.tapeaids.narrateme.audio.NarrationPlayer
 import com.tapeaids.narrateme.audio.NarrationRecorder
+import com.tapeaids.narrateme.audio.Speaker
+import com.tapeaids.narrateme.core.Cue
 import com.tapeaids.narrateme.core.Effect
 import com.tapeaids.narrateme.core.Input
 import com.tapeaids.narrateme.core.Mode
 import com.tapeaids.narrateme.core.NarrationController
 import com.tapeaids.narrateme.core.PageStore
-import com.tapeaids.narrateme.core.SinglePageMatcher
 import com.tapeaids.narrateme.core.State
+import com.tapeaids.narrateme.core.pickMatch
+import com.tapeaids.narrateme.recognition.PageRecognizer
 import com.tapeaids.narrateme.glasses.GlassesEvent
 import com.tapeaids.narrateme.glasses.GlassesSession
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,21 +31,26 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
+/** A saved page as shown on screen. */
+class PageThumb(val id: String, val label: String, val bitmap: Bitmap?)
+
 data class UiState(
     val mode: Mode = Mode.NARRATE,
     val state: State = State.Idle,
-    val pagePhoto: Bitmap? = null,
+    val pages: List<PageThumb> = emptyList(),
+    val lastMatch: String = "",
     val message: String = "",
     val useMock: Boolean = false,
 )
 
 /** Wires the glasses, audio and storage to the narrate/listen state machine. */
 class NarrateViewModel(app: Application) : AndroidViewModel(app) {
-    private val store = PageStore(File(app.filesDir, "page"))
-    private val controller = NarrationController(SinglePageMatcher(store))
+    private val store = PageStore(File(app.filesDir, "pages"))
+    private val controller = NarrationController()
+    private val recognizer = PageRecognizer()
     private val recorder = NarrationRecorder(app)
     private val player = NarrationPlayer()
-    private val beeper = Beeper()
+    private val speaker = Speaker(app)
     val glasses = GlassesSession(app, viewModelScope)
 
     // Effects from successive inputs run strictly in order (e.g. a stop can't overtake a start).
@@ -68,7 +74,7 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
-        viewModelScope.launch { refreshThumbnail() }
+        viewModelScope.launch { refreshPages() }
     }
 
     fun setMode(mode: Mode) {
@@ -80,6 +86,19 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { glasses.enableMock(enabled) }
             .onFailure { say("Mock glasses failed: ${it.message}") }
         _ui.value = _ui.value.copy(useMock = enabled)
+    }
+
+    /** Deletes every saved page. Only between interactions. */
+    fun clearPages() {
+        if (controller.state != State.Idle) return
+        viewModelScope.launch {
+            effectLock.withLock {
+                withContext(Dispatchers.IO) { store.clear() }
+                recognizer.forgetAll()
+                refreshPages()
+                say("All pages cleared")
+            }
+        }
     }
 
     fun register(activity: Activity) = glasses.register(activity)
@@ -117,7 +136,24 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
                     recorder.stop()?.let { store.save(effect.photo, it) }
                 }
                 say(if (saved != null) "Narration saved" else "Nothing was recorded")
-                refreshThumbnail()
+                refreshPages()
+            }
+            is Effect.FindPage -> {
+                say("Looking for the page…")
+                val pages = withContext(Dispatchers.IO) { store.list() }
+                val scores = withContext(Dispatchers.Default) {
+                    runCatching { recognizer.score(effect.photo, pages) }
+                        .onFailure { say("Page matching failed: ${it.message}") }
+                        .getOrDefault(emptyList())
+                }
+                val pick = pickMatch(scores)
+                val labels = pages.withIndex().associate { (i, p) -> p.id to "page ${i + 1}" }
+                val summary = if (scores.isEmpty()) "no saved pages" else
+                    scores.joinToString { "${labels[it.page.id]} = ${it.score}" }
+                _ui.value = _ui.value.copy(
+                    lastMatch = "Match scores: $summary → ${pick?.let { labels[it.id] } ?: "not recognised"}",
+                )
+                handle(if (pick != null) Input.PageFound(pick) else Input.PageNotFound)
             }
             is Effect.Play -> {
                 say("Playing narration")
@@ -126,6 +162,7 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
                     onFinished = { handle(Input.PlaybackFinished) },
                     onError = {
                         say(it)
+                        viewModelScope.launch { speaker.say("Playback failed") }
                         handle(Input.PlaybackFinished)
                     },
                 )
@@ -134,15 +171,15 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
                 player.stop()
                 say("Stopped")
             }
-            is Effect.Beep -> delay(beeper.play(effect.cue))
+            is Effect.Announce -> speaker.say(effect.cue.phrase())
         }
     }
 
-    private suspend fun refreshThumbnail() {
-        val bitmap = withContext(Dispatchers.IO) {
-            store.load()?.photo?.let { decodeThumbnail(it) }
+    private suspend fun refreshPages() {
+        val thumbs = withContext(Dispatchers.IO) {
+            store.list().mapIndexed { i, page -> PageThumb(page.id, "Page ${i + 1}", decodeThumbnail(page.photo)) }
         }
-        _ui.value = _ui.value.copy(pagePhoto = bitmap)
+        _ui.value = _ui.value.copy(pages = thumbs)
     }
 
     private fun decodeThumbnail(file: File): Bitmap? {
@@ -164,11 +201,20 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         recorder.stop()
         player.stop()
-        beeper.release()
+        speaker.release()
         glasses.disconnect()
     }
 
+    private fun Cue.phrase() = when (this) {
+        Cue.RECORDING_STARTED -> "Recording started"
+        Cue.SAVED -> "Narration saved"
+        Cue.RECOGNISED -> "Page recognised, starting narration"
+        Cue.NOT_RECOGNISED -> "Page not recognised"
+        Cue.PHOTO_FAILED -> "Photo failed, please try again"
+        Cue.RECORDING_FAILED -> "Recording failed"
+    }
+
     private companion object {
-        const val THUMB_PX = 600
+        const val THUMB_PX = 300
     }
 }

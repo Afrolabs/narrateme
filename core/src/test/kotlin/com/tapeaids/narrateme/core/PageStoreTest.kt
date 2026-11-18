@@ -3,7 +3,7 @@ package com.tapeaids.narrateme.core
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -17,16 +17,16 @@ class PageStoreTest {
         tmp.newFile().apply { writeBytes(bytes) }
 
     @Test
-    fun `load is null when nothing is stored`() {
-        assertNull(PageStore(tmp.newFolder()).load())
+    fun `list is empty when nothing is stored`() {
+        assertEquals(emptyList<Page>(), PageStore(File(tmp.root, "missing")).list())
     }
 
     @Test
-    fun `save then load round-trips photo and audio`() {
+    fun `save then list round-trips photo and audio`() {
         val store = PageStore(tmp.newFolder())
         val audio = recording(byteArrayOf(9, 8, 7))
         val saved = store.save(byteArrayOf(1, 2), audio)
-        val loaded = store.load()!!
+        val loaded = store.list().single()
         assertEquals(saved, loaded)
         assertArrayEquals(byteArrayOf(1, 2), loaded.photo.readBytes())
         assertArrayEquals(byteArrayOf(9, 8, 7), loaded.audio.readBytes())
@@ -34,28 +34,29 @@ class PageStoreTest {
     }
 
     @Test
-    fun `second save replaces both files`() {
+    fun `each save adds a page, oldest first, even within the same millisecond`() {
+        val store = PageStore(tmp.newFolder(), clock = { 1000L })
+        val first = store.save(byteArrayOf(1), recording(byteArrayOf(1)))
+        val second = store.save(byteArrayOf(2, 2), recording(byteArrayOf(3, 3, 3)))
+        assertNotEquals(first.id, second.id)
+        assertEquals(listOf(first, second), store.list())
+        assertArrayEquals(byteArrayOf(2, 2), store.list()[1].photo.readBytes())
+    }
+
+    @Test
+    fun `incomplete and temporary folders are not listed`() {
+        val dir = tmp.newFolder()
+        File(dir, "5").mkdirs()
+        File(dir, "5/${PageStore.PHOTO_NAME}").writeBytes(byteArrayOf(1))
+        File(dir, "6.tmp").mkdirs()
+        assertEquals(emptyList<Page>(), PageStore(dir).list())
+    }
+
+    @Test
+    fun `clear removes every page`() {
         val store = PageStore(tmp.newFolder())
         store.save(byteArrayOf(1), recording(byteArrayOf(1)))
-        store.save(byteArrayOf(2, 2), recording(byteArrayOf(3, 3, 3)))
-        val page = store.load()!!
-        assertArrayEquals(byteArrayOf(2, 2), page.photo.readBytes())
-        assertArrayEquals(byteArrayOf(3, 3, 3), page.audio.readBytes())
-    }
-
-    @Test
-    fun `load is null when only the photo exists`() {
-        val dir = tmp.newFolder()
-        File(dir, PageStore.PHOTO_NAME).writeBytes(byteArrayOf(1))
-        assertNull(PageStore(dir).load())
-    }
-
-    @Test
-    fun `single page matcher returns whatever is stored`() {
-        val store = PageStore(tmp.newFolder())
-        val matcher = SinglePageMatcher(store)
-        assertNull(matcher.match(byteArrayOf(0)))
-        val page = store.save(byteArrayOf(1), recording(byteArrayOf(2)))
-        assertEquals(page, matcher.match(byteArrayOf(42)))
+        store.clear()
+        assertEquals(emptyList<Page>(), store.list())
     }
 }
