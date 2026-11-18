@@ -77,6 +77,12 @@ class GlassesSession(
 
     init {
         scope.launch {
+            Wearables.registrationErrorStream.collect { error ->
+                Log.w(TAG, "Registration error: $error")
+                _status.value = "Registration failed: $error"
+            }
+        }
+        scope.launch {
             while (isActive) {
                 _devices.value = knownDevices().map { it.describe() }
                 delay(DEVICE_POLL_MS)
