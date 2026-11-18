@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.addCamera
+import com.meta.wearable.dat.camera.photo.types.PhotoError
 import com.meta.wearable.dat.camera.photo.types.PhotoQuality
 import com.meta.wearable.dat.camera.photo.types.PhotoResolution
 import com.meta.wearable.dat.camera.photo.types.PhotoState
@@ -112,6 +113,7 @@ class GlassesSession(
     private var camera: Camera? = null
     private var mockGlasses: MockGlasses? = null
     private val jobs = mutableListOf<Job>()
+    private var photoAttempts = 0
 
     fun register(activity: Activity) = Wearables.startRegistration(activity)
 
@@ -235,10 +237,26 @@ class GlassesSession(
         // Subscribe before the photo child starts, as Meta's docs recommend.
         val photo = cam.photo
         jobs += scope.launch {
-            photo.photoStream.collect { _events.emit(GlassesEvent.PhotoTaken(it.imageData)) }
+            photo.photoStream.collect {
+                Log.i(TAG, "Photo received: ${it.imageData.size} bytes after ${photoAttempts} attempt(s)")
+                photoAttempts = 0
+                _events.emit(GlassesEvent.PhotoTaken(it.imageData))
+            }
         }
         jobs += scope.launch {
-            photo.errors.collect { _events.emit(GlassesEvent.PhotoFailed(it.description)) }
+            photo.errors.collect { error ->
+                Log.w(TAG, "Photo error ${error.name} on attempt $photoAttempts")
+                if (error in RETRYABLE_PHOTO_ERRORS && photoAttempts < MAX_PHOTO_ATTEMPTS) {
+                    // A glasses capture-button press can also start the glasses' own capture,
+                    // which keeps the camera busy for a moment. Back off and try again.
+                    _status.value = "Photo attempt $photoAttempts failed (${error.name}), retrying…"
+                    delay(PHOTO_RETRY_MS * photoAttempts)
+                    requestPhoto(photo)
+                } else {
+                    photoAttempts = 0
+                    _events.emit(GlassesEvent.PhotoFailed("${error.name}: ${error.description}"))
+                }
+            }
         }
     }
 
@@ -255,11 +273,18 @@ class GlassesSession(
                 photo.state.first { it == PhotoState.STARTED }
             }
             if (ready == null) {
-                _events.emit(GlassesEvent.PhotoFailed("Camera not ready"))
+                _events.emit(GlassesEvent.PhotoFailed("Camera not ready (photo state ${photo.state.value})"))
             } else {
-                photo.capturePhoto(PhotoResolution.FULL, PhotoQuality.HIGH)
+                photoAttempts = 0
+                requestPhoto(photo)
             }
         }
+    }
+
+    private fun requestPhoto(photo: com.meta.wearable.dat.camera.photo.Photo) {
+        photoAttempts++
+        Log.i(TAG, "Requesting photo, attempt $photoAttempts")
+        photo.capturePhoto(PhotoResolution.FULL, PhotoQuality.HIGH)
     }
 
     /** On-screen stand-ins for the glasses buttons. In mock mode they go through the mock device. */
@@ -309,6 +334,9 @@ class GlassesSession(
         const val CONNECT_TIMEOUT_MS = 15_000L
         const val PHOTO_READY_TIMEOUT_MS = 5_000L
         const val DEVICE_WAIT_MS = 10_000L
+        const val MAX_PHOTO_ATTEMPTS = 3
+        const val PHOTO_RETRY_MS = 1_500L
+        val RETRYABLE_PHOTO_ERRORS = setOf(PhotoError.CAPTURE_FAILURE, PhotoError.BUSY, PhotoError.NOT_READY)
         const val DEVICE_POLL_MS = 1_000L
     }
 }
