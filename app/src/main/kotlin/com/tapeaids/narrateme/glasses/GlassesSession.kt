@@ -14,6 +14,8 @@ import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.Device
+import com.meta.wearable.dat.core.types.DeviceCompatibility
+import com.meta.wearable.dat.core.types.DeviceSessionError
 import com.meta.wearable.dat.core.types.RegistrationState
 import com.meta.wearable.dat.inputs.addInputs
 import com.meta.wearable.dat.inputs.types.ButtonType
@@ -51,6 +53,9 @@ sealed interface GlassesEvent {
     data class PhotoFailed(val reason: String) : GlassesEvent
 }
 
+/** Something on the glasses side needs updating before a session can start. */
+enum class GlassesUpdate { GLASSES_APP, FIRMWARE }
+
 /**
  * Wraps the Meta Wearables Device Access Toolkit: registration, the device
  * session, button input and photo capture. With [useMock] it drives Meta's
@@ -71,6 +76,9 @@ class GlassesSession(
 
     val registration: StateFlow<RegistrationState> get() = Wearables.registrationState
 
+    private val _update = MutableStateFlow<GlassesUpdate?>(null)
+    val updateNeeded: StateFlow<GlassesUpdate?> = _update.asStateFlow()
+
     private val _devices = MutableStateFlow<List<String>>(emptyList())
     /** One line per glasses the toolkit knows about, for diagnosing "no eligible device". */
     val devices: StateFlow<List<String>> = _devices.asStateFlow()
@@ -84,7 +92,11 @@ class GlassesSession(
         }
         scope.launch {
             while (isActive) {
-                _devices.value = knownDevices().map { it.describe() }
+                val known = knownDevices()
+                _devices.value = known.map { it.describe() }
+                if (known.any { it.compatibility == DeviceCompatibility.DEVICE_UPDATE_REQUIRED }) {
+                    _update.value = GlassesUpdate.FIRMWARE
+                }
                 delay(DEVICE_POLL_MS)
             }
         }
@@ -102,6 +114,15 @@ class GlassesSession(
     private val jobs = mutableListOf<Job>()
 
     fun register(activity: Activity) = Wearables.startRegistration(activity)
+
+    /** Opens Meta AI on the update screen the glasses need. */
+    fun openUpdate(activity: Activity, update: GlassesUpdate) {
+        val result = when (update) {
+            GlassesUpdate.GLASSES_APP -> Wearables.openDATGlassesAppUpdate(activity)
+            GlassesUpdate.FIRMWARE -> Wearables.openFirmwareUpdate(activity)
+        }
+        result.errorOrNull()?.let { _status.value = "Couldn't open the update screen: $it" }
+    }
 
     fun enableMock(enabled: Boolean) {
         val kit = MockDeviceKit.getInstance(context)
@@ -148,16 +169,29 @@ class GlassesSession(
                 return@launch
             }
             session = s
+            // errors is a SharedFlow without replay: subscribe before start() or the reason is lost.
+            var lastError: DeviceSessionError? = null
+            jobs += launch {
+                s.errors.collect { error ->
+                    Log.w(TAG, "Session error: $error")
+                    lastError = error
+                    _status.value = "Session error: $error"
+                    if (error == DeviceSessionError.DAT_APP_ON_THE_GLASSES_UPDATE_REQUIRED) {
+                        _update.value = GlassesUpdate.GLASSES_APP
+                    }
+                }
+            }
             s.start()
             val started = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
                 s.state.first { it == DeviceSessionState.STARTED }
             }
             if (started == null) {
-                _status.value = "Glasses didn't start a session (state ${s.state.value})"
+                val why = lastError?.let { ", error $it" } ?: ""
                 disconnect()
+                _status.value = "Glasses didn't start a session (state ${s.state.value}$why). " +
+                    "Wear the glasses with the arms unfolded and try again."
                 return@launch
             }
-            jobs += launch { s.errors.collect { Log.w(TAG, "Session error: $it") } }
             jobs += launch {
                 s.state.collect { state ->
                     if (state == DeviceSessionState.STOPPED) {
