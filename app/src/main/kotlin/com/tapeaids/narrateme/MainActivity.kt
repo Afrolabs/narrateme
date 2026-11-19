@@ -24,6 +24,20 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
@@ -148,7 +162,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppPage { HOME, RECORD, GLASSES, ABOUT }
+private enum class AppPage { HOME, RECORD, PAGES, GLASSES, ABOUT }
 
 @Composable
 private fun Screen(
@@ -168,7 +182,14 @@ private fun Screen(
     Box(Modifier.safeDrawingPadding()) {
         when (page) {
             AppPage.HOME -> HomeScreen(vm, cameraGranted, onAskPermissions, onOpen = { page = it })
-            AppPage.RECORD -> RecordScreen(vm, cameraGranted, onAskPermissions, onClearPages, onBack = goHome)
+            AppPage.RECORD -> RecordScreen(
+                vm, cameraGranted, onAskPermissions,
+                onOpenPages = { page = AppPage.PAGES },
+                onBack = goHome,
+            )
+            AppPage.PAGES -> SubScreen("Saved pages", onBack = { page = AppPage.RECORD }) {
+                SavedPages(vm, onClearPages)
+            }
             AppPage.GLASSES -> SubScreen("Glasses", onBack = goHome) {
                 GlassesPanel(vm, onRegister, onUpdate, onCameraPermission)
             }
@@ -295,78 +316,210 @@ private fun SubScreen(title: String, onBack: () -> Unit, content: @Composable ()
     }
 }
 
-/** For the sighted narrator: aim at the page, Capture to start recording, Stop to save. */
+/**
+ * For the sighted narrator, like a camera app: the camera feed with a shutter
+ * button. Taking the picture starts recording; the page photo then fills the
+ * screen with a live waveform of the narrator's voice over it, and a stop button
+ * at the bottom saves the narration.
+ */
 @Composable
 private fun RecordScreen(
     vm: NarrateViewModel,
     cameraGranted: Boolean,
     onAskPermissions: () -> Unit,
-    onClearPages: () -> Unit,
+    onOpenPages: () -> Unit,
     onBack: () -> Unit,
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
-    val idle = ui.state == State.Idle
     val onPhone = ui.device == DeviceKind.PHONE
     LaunchedEffect(Unit) { vm.setMode(Mode.NARRATE) }
-    val back = {
-        // Leaving mid-recording saves it, like pressing Stop.
-        if (ui.state is State.Recording) vm.pressAction()
+    val recording = ui.state as? State.Recording
+    BackHandler {
+        // Leaving mid-recording saves it, like pressing stop.
+        if (recording != null) vm.pressAction()
         onBack()
     }
-    SubScreen("Record narration", onBack = back) {
-        if (onPhone) {
-            if (cameraGranted) {
-                CameraView(vm, Modifier.fillMaxWidth().height(320.dp))
-            } else {
-                Text("narrateme needs the camera to see the page.")
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (recording != null) {
+            PagePhoto(recording.photo, Modifier.fillMaxSize())
+            Waveform(vm, Modifier.align(Alignment.Center).fillMaxWidth().height(180.dp))
+            RecordingBadge(Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
+        } else if (onPhone && cameraGranted) {
+            CameraView(vm, Modifier.fillMaxSize())
+        } else if (onPhone) {
+            Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("narrateme needs the camera to see the page.", color = Color.White)
                 Button(onClick = onAskPermissions) { Text("Allow camera") }
             }
         } else {
             val status by vm.glasses.status.collectAsStateWithLifecycle()
-            Text("Using the glasses: $status")
+            Text(
+                "Look at the page through the glasses. Glasses: $status",
+                color = Color.White,
+                modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                textAlign = TextAlign.Center,
+            )
         }
 
-        Text(ui.state.label(), style = MaterialTheme.typography.titleMedium)
-        if (ui.message.isNotEmpty()) Text(ui.message)
+        if (recording == null) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.align(Alignment.TopStart).padding(12.dp)
+                    .semantics { contentDescription = "Back" },
+            ) { Text("←", fontSize = 28.sp, color = Color.White) }
+        }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = vm::pressCapture, modifier = Modifier.weight(1f).height(72.dp)) {
-                Text("Capture", style = MaterialTheme.typography.titleLarge)
+        Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.45f))
+                .padding(vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (ui.message.isNotEmpty()) {
+                Text(ui.message, color = Color.White, textAlign = TextAlign.Center, modifier = Modifier.padding(8.dp))
             }
-            OutlinedButton(onClick = vm::pressAction, modifier = Modifier.weight(1f).height(72.dp)) {
-                Text("Stop", style = MaterialTheme.typography.titleLarge)
-            }
-        }
-        Text(
-            if (onPhone) "Volume up = Capture, volume down = Stop" else "Or use the glasses' capture and action buttons",
-            style = MaterialTheme.typography.bodySmall,
-        )
-
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Saved pages (${ui.pages.size})", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-            OutlinedButton(onClick = onClearPages, enabled = idle && ui.pages.isNotEmpty()) { Text("Clear all") }
-        }
-        if (ui.pages.isEmpty()) {
-            Text("None yet. Capture a page and read it aloud.")
-        } else {
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                ui.pages.forEach { saved ->
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        saved.bitmap?.let {
-                            Image(
-                                bitmap = it.asImageBitmap(),
-                                contentDescription = "Photo of ${saved.label}",
-                                modifier = Modifier.height(140.dp),
-                            )
-                        }
-                        Text(saved.label, style = MaterialTheme.typography.bodySmall)
-                    }
+            Box(Modifier.fillMaxWidth().height(96.dp)) {
+                if (recording == null) {
+                    LastPageButton(ui.pages.lastOrNull(), ui.pages.size, onOpenPages, Modifier.align(Alignment.CenterStart).padding(start = 24.dp))
+                    ShutterButton(
+                        enabled = ui.state == State.Idle,
+                        onClick = vm::pressCapture,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                } else {
+                    StopButton(onClick = vm::pressAction, modifier = Modifier.align(Alignment.Center))
                 }
             }
+        }
+    }
+}
+
+/** The camera-app shutter: a white disc in a ring. */
+@Composable
+private fun ShutterButton(enabled: Boolean, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier
+            .size(84.dp)
+            .border(5.dp, Color.White, CircleShape)
+            .padding(9.dp)
+            .clip(CircleShape)
+            .background(if (enabled) Color.White else Color.Gray)
+            .clickable(enabled = enabled, onClickLabel = "Take picture and start recording", onClick = onClick),
+    )
+}
+
+/** The video-recorder stop: a red square in a white ring. */
+@Composable
+private fun StopButton(onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier
+            .size(84.dp)
+            .border(5.dp, Color.White, CircleShape)
+            .clip(CircleShape)
+            .clickable(onClickLabel = "Stop recording", onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFFE53935)))
+    }
+}
+
+/** The thumbnail in the corner, like a camera app's gallery button. */
+@Composable
+private fun LastPageButton(last: PageThumb?, count: Int, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier
+            .size(56.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(2.dp, Color.White, RoundedCornerShape(8.dp))
+            .background(Color.DarkGray)
+            .clickable(onClickLabel = "Saved pages", onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        val bitmap = last?.bitmap
+        if (bitmap != null) {
+            Image(bitmap.asImageBitmap(), contentDescription = "Saved pages", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        }
+        Text("$count", color = Color.White, style = MaterialTheme.typography.titleMedium)
+    }
+}
+
+/** The photo just taken, decoded off the main thread at screen-ish size. */
+@Composable
+private fun PagePhoto(photo: ByteArray, modifier: Modifier) {
+    val bitmap by produceState<android.graphics.Bitmap?>(null, photo) {
+        value = withContext(Dispatchers.Default) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(photo, 0, photo.size, bounds)
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= 1600) sample *= 2
+            BitmapFactory.decodeByteArray(photo, 0, photo.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+    }
+    bitmap?.let {
+        Image(it.asImageBitmap(), contentDescription = "The page being narrated", contentScale = ContentScale.Fit, modifier = modifier)
+    }
+}
+
+/** A live waveform of the narrator's voice: newest on the right, scrolling left. */
+@Composable
+private fun Waveform(vm: NarrateViewModel, modifier: Modifier) {
+    val levels by vm.levels.collectAsStateWithLifecycle()
+    Canvas(modifier.background(Color.Black.copy(alpha = 0.25f))) {
+        val slots = 120
+        val step = size.width / slots
+        val mid = size.height / 2
+        val offset = slots - levels.size
+        levels.forEachIndexed { i, level ->
+            // Square root so quiet speech still shows.
+            val h = (kotlin.math.sqrt(level.coerceIn(0f, 1f)) * size.height * 0.9f).coerceAtLeast(2f)
+            val x = (offset + i) * step + step / 2
+            drawLine(
+                color = Color(0xCC64B5F6),
+                start = Offset(x, mid - h / 2),
+                end = Offset(x, mid + h / 2),
+                strokeWidth = step * 0.6f,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+/** A red dot and a running clock while recording. */
+@Composable
+private fun RecordingBadge(modifier: Modifier) {
+    val seconds by produceState(0) {
+        val start = System.currentTimeMillis()
+        while (true) {
+            value = ((System.currentTimeMillis() - start) / 1000).toInt()
+            delay(250)
+        }
+    }
+    Row(
+        modifier.background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(16.dp)).padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(12.dp).clip(CircleShape).background(Color(0xFFE53935)))
+        Spacer(Modifier.size(8.dp))
+        Text("%d:%02d".format(seconds / 60, seconds % 60), color = Color.White, style = MaterialTheme.typography.titleMedium)
+    }
+}
+
+/** The saved pages, with Clear all. */
+@Composable
+private fun SavedPages(vm: NarrateViewModel, onClearPages: () -> Unit) {
+    val ui by vm.ui.collectAsStateWithLifecycle()
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("${ui.pages.size} saved", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+        OutlinedButton(onClick = onClearPages, enabled = ui.state == State.Idle && ui.pages.isNotEmpty()) { Text("Clear all") }
+    }
+    if (ui.pages.isEmpty()) Text("None yet. Take a picture of a page and read it aloud.")
+    ui.pages.forEach { saved ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            saved.bitmap?.let {
+                Image(it.asImageBitmap(), contentDescription = "Photo of ${saved.label}", modifier = Modifier.height(120.dp))
+            }
+            Text(saved.label)
         }
     }
 }

@@ -14,7 +14,11 @@ import android.util.Log
 import com.tapeaids.narrateme.core.WavFileWriter
 import com.tapeaids.narrateme.device.MicSource
 import java.io.File
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 /**
  * Records the narrator to a 16-bit mono WAV file, from either microphone:
@@ -29,6 +33,11 @@ class NarrationRecorder(private val context: Context) {
     private var record: AudioRecord? = null
     private var worker: Thread? = null
     private var output: File? = null
+    private val _levels = MutableStateFlow(FloatArray(0))
+
+    /** The most recent loudness levels (0..1, oldest first), for drawing a live waveform. */
+    val levels: StateFlow<FloatArray> = _levels.asStateFlow()
+
     private var routedSco = false
     @Volatile private var running = false
 
@@ -63,10 +72,15 @@ class NarrationRecorder(private val context: Context) {
         rec.startRecording()
         worker = thread(name = "narration-recorder") {
             val buffer = ByteArray(BUFFER_BYTES)
+            val recent = ArrayDeque<Float>()
+            _levels.value = FloatArray(0)
             try {
                 while (running) {
                     val n = rec.read(buffer, 0, buffer.size)
-                    if (n > 0) writer.write(buffer, n)
+                    if (n > 0) {
+                        writer.write(buffer, n)
+                        addLevels(buffer, n, recent)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Recording failed", e)
@@ -91,6 +105,24 @@ class NarrationRecorder(private val context: Context) {
         worker = null
         releaseRoute()
         return output.also { output = null }
+    }
+
+    /** Splits a PCM16 buffer into a few slices and records each slice's peak. */
+    private fun addLevels(buffer: ByteArray, n: Int, recent: ArrayDeque<Float>) {
+        val samples = n / 2
+        val perSlice = maxOf(1, samples / LEVEL_SLICES)
+        var i = 0
+        while (i + perSlice <= samples) {
+            var peak = 0
+            for (s in i until i + perSlice) {
+                val v = (buffer[2 * s].toInt() and 0xFF) or (buffer[2 * s + 1].toInt() shl 8)
+                peak = maxOf(peak, abs(v))
+            }
+            recent.addLast(peak / 32768f)
+            if (recent.size > LEVEL_HISTORY) recent.removeFirst()
+            i += perSlice
+        }
+        _levels.value = recent.toFloatArray()
     }
 
     @SuppressLint("MissingPermission")
@@ -150,5 +182,7 @@ class NarrationRecorder(private val context: Context) {
         val PHONE_SAMPLE_RATES = listOf(44_100, 16_000)
         const val BUFFER_BYTES = 8_820 // 100 ms at 44.1 kHz mono PCM16
         const val JOIN_TIMEOUT_MS = 2_000L
+        const val LEVEL_SLICES = 4 // 25 ms per level at 100 ms reads
+        const val LEVEL_HISTORY = 120 // about 3 seconds
     }
 }

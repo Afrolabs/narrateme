@@ -57,6 +57,9 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
     private val player = NarrationPlayer()
     private val speaker = Speaker(app)
     private val pageTurn = PageTurnSound(app)
+
+    /** Live loudness while recording, for the waveform over the page. */
+    val levels get() = recorder.levels
     val phone = PhoneDevice(app, viewModelScope)
     val glasses = GlassesSession(app, viewModelScope)
     private val prefs = app.getSharedPreferences("narrateme", android.content.Context.MODE_PRIVATE)

@@ -18,7 +18,7 @@ It's an Android app (Kotlin, Jetpack Compose). The glasses support uses Meta's [
 - When a narration ends it waits for the next page: turn the page, hold still, and it snaps again. The page it just read isn't snapped twice.
 - Tap anywhere to pause or carry on. Volume up skips to the page now in view. Back or volume down stops listening.
 
-**Record narration** (from the ☰ menu) is for the narrator. Aim at the page, press **Capture** (or volume up), and after "Recording started" read the page aloud. Press **Stop** (or volume down) to save it.
+**Record narration** (from the ☰ menu) works like a camera app, for the narrator. Aim at the page and press the shutter (or volume up). The photo then fills the screen with a live waveform of your voice over it while you read the page aloud. Press the red stop button (or volume down) to save. The thumbnail in the corner opens the saved pages.
 
 **Glasses** (from the ☰ menu) switches the camera, mic and buttons over to the glasses: capture snaps a page, action stops. It also has registration, connection and mock mode. Narration and prompts play in the glasses whenever they're connected over Bluetooth, whichever device is chosen.
 
@@ -48,7 +48,7 @@ You can run just the core tests without the Android SDK: `./gradlew -PcoreOnly :
 ## Try it on your phone
 
 1. Install the APK on your Android phone (Android 10+) and allow **Camera** and **Microphone**.
-2. ☰ → **Record narration**. Aim at a page, press **Capture**, read it aloud, press **Stop**. Do a few pages.
+2. ☰ → **Record narration**. Aim at a page, press the shutter, read it aloud, press stop. Do a few pages.
 3. Back on the main screen, tap **Listen to pages** and hold the phone over one of them.
 
 ## Try it with glasses
@@ -61,7 +61,7 @@ You can run just the core tests without the Android SDK: `./gradlew -PcoreOnly :
 6. **Narrate:** ☰ → **Record narration** and look at the page. Press the glasses **capture button**. After "Recording started", read the page aloud. Press the **action button**, or capture again, to finish.
 7. **Listen:** on the main screen tap **Listen to pages** (or press capture). It snaps what you're looking at straight away. Its narration plays in the glasses. For the next page, press **capture** again.
 
-On the Record narration screen, the on-screen **Capture** and **Stop** buttons do the same as the glasses buttons, if a button doesn't reach the app.
+On the Record narration screen, the on-screen shutter and stop buttons do the same as the glasses buttons, if a button doesn't reach the app.
 
 ### Without glasses
 
