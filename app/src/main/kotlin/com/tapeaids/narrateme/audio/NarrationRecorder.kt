@@ -12,38 +12,49 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import com.tapeaids.narrateme.core.WavFileWriter
+import com.tapeaids.narrateme.device.MicSource
 import java.io.File
 import kotlin.concurrent.thread
 
 /**
- * Records the narrator through the glasses mics. The glasses expose their mics
- * over Bluetooth HFP (SCO), so this routes communication audio to the glasses,
- * records 16-bit mono PCM (16 kHz, or 8 kHz if that's all the link offers) and
- * writes a WAV file. [stop] releases the SCO link so playback can use A2DP.
+ * Records the narrator to a 16-bit mono WAV file, from either microphone:
+ *
+ * - [MicSource.PHONE]: the phone's built-in mic at 44.1 kHz (16 kHz fallback).
+ * - [MicSource.BLUETOOTH]: the glasses mics, which come over Bluetooth HFP (SCO).
+ *   This routes communication audio to the glasses and records at 16 kHz, or 8 kHz
+ *   if that's all the link offers. [stop] releases the SCO link so playback can use A2DP.
  */
 class NarrationRecorder(private val context: Context) {
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private var record: AudioRecord? = null
     private var worker: Thread? = null
     private var output: File? = null
+    private var routedSco = false
     @Volatile private var running = false
 
     /** Starts recording to [file]. Returns an error message, or null on success. */
     @SuppressLint("MissingPermission") // checked below
-    fun start(file: File): String? {
+    fun start(file: File, mic: MicSource): String? {
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             return "Microphone permission not granted"
         }
-        if (!routeToGlasses()) {
-            releaseRoute()
-            return "Glasses microphone not available over Bluetooth"
+        val bluetooth = mic == MicSource.BLUETOOTH
+        if (bluetooth) {
+            routedSco = true
+            if (!routeToGlasses()) {
+                releaseRoute()
+                return "Glasses microphone not available over Bluetooth"
+            }
         }
-        val rec = SAMPLE_RATES.firstNotNullOfOrNull { openRecord(it) }
+        val rates = if (bluetooth) SCO_SAMPLE_RATES else PHONE_SAMPLE_RATES
+        val source = if (bluetooth) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.MIC
+        val rec = rates.firstNotNullOfOrNull { openRecord(it, source) }
         if (rec == null) {
             releaseRoute()
             return "Could not open the microphone"
         }
-        preferredScoInput()?.let { rec.setPreferredDevice(it) }
+        val preferred = if (bluetooth) input(AudioDeviceInfo.TYPE_BLUETOOTH_SCO) else input(AudioDeviceInfo.TYPE_BUILTIN_MIC)
+        preferred?.let { rec.setPreferredDevice(it) }
 
         val writer = WavFileWriter(file, rec.sampleRate)
         record = rec
@@ -83,11 +94,11 @@ class NarrationRecorder(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun openRecord(rate: Int): AudioRecord? {
+    private fun openRecord(rate: Int, source: Int): AudioRecord? {
         val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         if (min <= 0) return null
         val rec = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            source,
             rate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -117,6 +128,8 @@ class NarrationRecorder(private val context: Context) {
     }
 
     private fun releaseRoute() {
+        if (!routedSco) return
+        routedSco = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             audioManager.clearCommunicationDevice()
         } else {
@@ -128,14 +141,14 @@ class NarrationRecorder(private val context: Context) {
         audioManager.mode = AudioManager.MODE_NORMAL
     }
 
-    private fun preferredScoInput(): AudioDeviceInfo? =
-        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+    private fun input(type: Int): AudioDeviceInfo? =
+        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.type == type }
 
     private companion object {
         const val TAG = "NarrationRecorder"
-        val SAMPLE_RATES = listOf(16_000, 8_000)
-        const val BUFFER_BYTES = 3_200 // 100 ms at 16 kHz mono PCM16
+        val SCO_SAMPLE_RATES = listOf(16_000, 8_000)
+        val PHONE_SAMPLE_RATES = listOf(44_100, 16_000)
+        const val BUFFER_BYTES = 8_820 // 100 ms at 44.1 kHz mono PCM16
         const val JOIN_TIMEOUT_MS = 2_000L
     }
 }

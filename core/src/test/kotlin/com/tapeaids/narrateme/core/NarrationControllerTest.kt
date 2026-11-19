@@ -76,61 +76,6 @@ class NarrationControllerTest {
     }
 
     @Test
-    fun `listen looks the page up, announces it, then plays it`() {
-        val c = controller(Mode.LISTEN)
-        assertEquals(listOf(Effect.TakePhoto), c.on(Input.CapturePressed))
-        val find = c.on(Input.PhotoTaken(photo)).single() as Effect.FindPage
-        assertSame(photo, find.photo)
-        assertEquals(State.Matching, c.state)
-        assertEquals(
-            listOf(Effect.Announce(Cue.RECOGNISED), Effect.Play(page)),
-            c.on(Input.PageFound(page)),
-        )
-        assertEquals(State.Playing(page), c.state)
-    }
-
-    @Test
-    fun `capture stops playback`() {
-        val c = playing()
-        assertEquals(listOf(Effect.StopPlayback), c.on(Input.CapturePressed))
-        assertEquals(State.Idle, c.state)
-    }
-
-    @Test
-    fun `playback finishing returns to idle`() {
-        val c = playing()
-        assertEquals(emptyList<Effect>(), c.on(Input.PlaybackFinished))
-        assertEquals(State.Idle, c.state)
-    }
-
-    @Test
-    fun `unrecognised page is announced and returns to idle`() {
-        val c = controller(Mode.LISTEN)
-        c.on(Input.CapturePressed)
-        c.on(Input.PhotoTaken(photo))
-        assertEquals(listOf(Effect.Announce(Cue.NOT_RECOGNISED)), c.on(Input.PageNotFound))
-        assertEquals(State.Idle, c.state)
-    }
-
-    @Test
-    fun `buttons are ignored while matching`() {
-        val c = controller(Mode.LISTEN)
-        c.on(Input.CapturePressed)
-        c.on(Input.PhotoTaken(photo))
-        assertEquals(emptyList<Effect>(), c.on(Input.CapturePressed))
-        assertEquals(emptyList<Effect>(), c.on(Input.ActionPressed))
-        assertEquals(State.Matching, c.state)
-    }
-
-    @Test
-    fun `action button is ignored when idle or playing`() {
-        assertEquals(emptyList<Effect>(), controller().on(Input.ActionPressed))
-        val c = playing()
-        assertEquals(emptyList<Effect>(), c.on(Input.ActionPressed))
-        assertEquals(State.Playing(page), c.state)
-    }
-
-    @Test
     fun `mode change is ignored unless idle`() {
         val c = controller()
         c.on(Input.CapturePressed)
@@ -149,6 +94,124 @@ class NarrationControllerTest {
         assertEquals(emptyList<Effect>(), c.on(Input.PlaybackFinished))
         assertEquals(emptyList<Effect>(), c.on(Input.PageFound(page)))
         assertEquals(emptyList<Effect>(), c.on(Input.PageNotFound))
+        assertEquals(emptyList<Effect>(), c.on(Input.ScreenTapped))
+        assertEquals(State.Idle, c.state)
+    }
+
+    @Test
+    fun `action button is ignored when idle`() {
+        assertEquals(emptyList<Effect>(), controller().on(Input.ActionPressed))
+        assertEquals(emptyList<Effect>(), controller(Mode.LISTEN).on(Input.ActionPressed))
+    }
+
+    @Test
+    fun `listen starts scanning, then a snapped page is matched with a page-turn sound`() {
+        val c = controller(Mode.LISTEN)
+        assertEquals(
+            listOf(Effect.Announce(Cue.LOOKING), Effect.StartScanning(fresh = true)),
+            c.on(Input.CapturePressed),
+        )
+        assertEquals(State.Scanning, c.state)
+        val effects = c.on(Input.PhotoTaken(photo))
+        assertEquals(listOf(Effect.StopScanning, Effect.PageTurnSound), effects.take(2))
+        assertSame(photo, (effects[2] as Effect.FindPage).photo)
+        assertEquals(State.Matching, c.state)
+    }
+
+    @Test
+    fun `a recognised page is announced and read`() {
+        val c = controller(Mode.LISTEN)
+        c.on(Input.CapturePressed)
+        c.on(Input.PhotoTaken(photo))
+        assertEquals(listOf(Effect.Announce(Cue.RECOGNISED), Effect.Play(page)), c.on(Input.PageFound(page)))
+        assertEquals(State.Playing(page), c.state)
+    }
+
+    @Test
+    fun `an unrecognised page is announced and scanning carries on`() {
+        val c = controller(Mode.LISTEN)
+        c.on(Input.CapturePressed)
+        c.on(Input.PhotoTaken(photo))
+        assertEquals(
+            listOf(Effect.Announce(Cue.NOT_RECOGNISED), Effect.StartScanning(fresh = false)),
+            c.on(Input.PageNotFound),
+        )
+        assertEquals(State.Scanning, c.state)
+    }
+
+    @Test
+    fun `when a narration ends it scans for the next page`() {
+        val c = playing()
+        assertEquals(listOf(Effect.StartScanning(fresh = false)), c.on(Input.PlaybackFinished))
+        assertEquals(State.Scanning, c.state)
+    }
+
+    @Test
+    fun `tapping the screen pauses and resumes`() {
+        val c = playing()
+        assertEquals(listOf(Effect.PausePlayback), c.on(Input.ScreenTapped))
+        assertEquals(State.Paused(page), c.state)
+        assertEquals(listOf(Effect.ResumePlayback), c.on(Input.ScreenTapped))
+        assertEquals(State.Playing(page), c.state)
+    }
+
+    @Test
+    fun `tapping while scanning does nothing`() {
+        val c = controller(Mode.LISTEN)
+        c.on(Input.CapturePressed)
+        assertEquals(emptyList<Effect>(), c.on(Input.ScreenTapped))
+        assertEquals(State.Scanning, c.state)
+    }
+
+    @Test
+    fun `capture while scanning snaps once, for the glasses`() {
+        val c = controller(Mode.LISTEN)
+        c.on(Input.CapturePressed)
+        assertEquals(listOf(Effect.TakePhoto), c.on(Input.CapturePressed))
+        assertEquals(emptyList<Effect>(), c.on(Input.CapturePressed))
+        c.on(Input.PhotoFailed("x"))
+        assertEquals(State.Scanning, c.state)
+        assertEquals(listOf(Effect.TakePhoto), c.on(Input.CapturePressed))
+    }
+
+    @Test
+    fun `capture while reading skips to the page now in view`() {
+        val c = playing()
+        assertEquals(
+            listOf(Effect.StopPlayback, Effect.StartScanning(fresh = false), Effect.TakePhoto),
+            c.on(Input.CapturePressed),
+        )
+        assertEquals(State.Scanning, c.state)
+    }
+
+    @Test
+    fun `action stops listening from any listen state`() {
+        val scanning = controller(Mode.LISTEN).apply { on(Input.CapturePressed) }
+        assertEquals(
+            listOf(Effect.StopScanning, Effect.Announce(Cue.STOPPED_LISTENING)),
+            scanning.on(Input.ActionPressed),
+        )
+        assertEquals(State.Idle, scanning.state)
+
+        val reading = playing()
+        assertEquals(
+            listOf(Effect.StopPlayback, Effect.StopScanning, Effect.Announce(Cue.STOPPED_LISTENING)),
+            reading.on(Input.ActionPressed),
+        )
+        assertEquals(State.Idle, reading.state)
+
+        val paused = playing().apply { on(Input.ScreenTapped) }
+        paused.on(Input.ActionPressed)
+        assertEquals(State.Idle, paused.state)
+    }
+
+    @Test
+    fun `a match arriving after listening stopped is ignored`() {
+        val c = controller(Mode.LISTEN)
+        c.on(Input.CapturePressed)
+        c.on(Input.PhotoTaken(photo))
+        c.on(Input.ActionPressed)
+        assertEquals(emptyList<Effect>(), c.on(Input.PageFound(page)))
         assertEquals(State.Idle, c.state)
     }
 }

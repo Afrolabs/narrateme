@@ -31,6 +31,10 @@ import com.meta.wearable.dat.mockdevice.api.MockGlasses
 import com.meta.wearable.dat.inputs.removeInputs
 import com.meta.wearable.dat.camera.removeCamera
 import com.tapeaids.narrateme.R
+import com.tapeaids.narrateme.device.DeviceEvent
+import com.tapeaids.narrateme.device.DeviceKind
+import com.tapeaids.narrateme.device.MicSource
+import com.tapeaids.narrateme.device.NarrationDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -48,14 +52,6 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import android.graphics.Bitmap
 
-/** What the glasses tell the app. */
-sealed interface GlassesEvent {
-    data object CapturePressed : GlassesEvent
-    data object ActionPressed : GlassesEvent
-    class PhotoTaken(val bytes: ByteArray) : GlassesEvent
-    data class PhotoFailed(val reason: String) : GlassesEvent
-}
-
 /** Something on the glasses side needs updating before a session can start. */
 enum class GlassesUpdate { GLASSES_APP, FIRMWARE }
 
@@ -67,15 +63,18 @@ enum class GlassesUpdate { GLASSES_APP, FIRMWARE }
 class GlassesSession(
     private val context: Context,
     private val scope: CoroutineScope,
-) {
-    private val _events = MutableSharedFlow<GlassesEvent>(extraBufferCapacity = 16)
-    val events: SharedFlow<GlassesEvent> = _events.asSharedFlow()
+) : NarrationDevice {
+    override val kind = DeviceKind.GLASSES
+    override val mic = MicSource.BLUETOOTH
+
+    private val _events = MutableSharedFlow<DeviceEvent>(extraBufferCapacity = 16)
+    override val events: SharedFlow<DeviceEvent> = _events.asSharedFlow()
 
     private val _status = MutableStateFlow("Not connected")
-    val status: StateFlow<String> = _status.asStateFlow()
+    override val status: StateFlow<String> = _status.asStateFlow()
 
     private val _connected = MutableStateFlow(false)
-    val connected: StateFlow<Boolean> = _connected.asStateFlow()
+    override val connected: StateFlow<Boolean> = _connected.asStateFlow()
 
     val registration: StateFlow<RegistrationState> get() = Wearables.registrationState
 
@@ -224,9 +223,9 @@ class GlassesSession(
         jobs += scope.launch {
             inputs.events.collect { event ->
                 when (event) {
-                    is InputEvent.Capture -> _events.emit(GlassesEvent.CapturePressed)
+                    is InputEvent.Capture -> _events.emit(DeviceEvent.CapturePressed)
                     is InputEvent.Button ->
-                        if (event.button == ButtonType.ACTION) _events.emit(GlassesEvent.ActionPressed)
+                        if (event.button == ButtonType.ACTION) _events.emit(DeviceEvent.ActionPressed)
                     else -> Unit
                 }
             }
@@ -258,22 +257,22 @@ class GlassesSession(
      * full sensor resolution. The stream is stopped again so the glasses' Bluetooth
      * audio is free for recording. The result arrives on [events].
      */
-    fun capturePhoto() {
+    override fun capturePhoto() {
         val s = session
         if (s == null || camera == null) {
-            _events.tryEmit(GlassesEvent.PhotoFailed("Glasses not connected"))
+            _events.tryEmit(DeviceEvent.PhotoFailed("Glasses not connected"))
             return
         }
         if (photoJob?.isActive == true) return
         photoJob = scope.launch {
             val event = runCatching { captureFromStream(s) }
-                .getOrElse { GlassesEvent.PhotoFailed("Photo crashed: ${it.message}") }
+                .getOrElse { DeviceEvent.PhotoFailed("Photo crashed: ${it.message}") }
             _events.emit(event)
         }
     }
 
-    private suspend fun captureFromStream(s: DeviceSession): GlassesEvent {
-        var stream = camera?.stream ?: return GlassesEvent.PhotoFailed("Glasses not connected")
+    private suspend fun captureFromStream(s: DeviceSession): DeviceEvent {
+        var stream = camera?.stream ?: return DeviceEvent.PhotoFailed("Glasses not connected")
         if (stream.state.value != StreamState.STREAMING) {
             var started = stream.start()
             if (started.errorOrNull() != null) {
@@ -282,10 +281,10 @@ class GlassesSession(
                 s.removeCamera()
                 camera = null
                 startCamera(s)
-                stream = camera?.stream ?: return GlassesEvent.PhotoFailed("Camera unavailable")
+                stream = camera?.stream ?: return DeviceEvent.PhotoFailed("Camera unavailable")
                 started = stream.start()
             }
-            started.errorOrNull()?.let { return GlassesEvent.PhotoFailed("Camera stream didn't start: $it") }
+            started.errorOrNull()?.let { return DeviceEvent.PhotoFailed("Camera stream didn't start: $it") }
             _status.value = "Starting camera…"
             val streaming = withTimeoutOrNull(STREAM_START_TIMEOUT_MS) {
                 stream.state.first { it == StreamState.STREAMING }
@@ -293,14 +292,14 @@ class GlassesSession(
             if (streaming == null) {
                 val state = stream.state.value
                 stream.stop()
-                return GlassesEvent.PhotoFailed("Camera stream not ready (state $state)")
+                return DeviceEvent.PhotoFailed("Camera stream not ready (state $state)")
             }
         }
         val result = stream.capturePhoto()
         stream.stop()
         _status.value = "Connected"
         val data = result.getOrNull()
-            ?: return GlassesEvent.PhotoFailed("Photo failed: ${result.errorOrNull()}")
+            ?: return DeviceEvent.PhotoFailed("Photo failed: ${result.errorOrNull()}")
         val bytes = when (data) {
             is PhotoData.Bitmap -> ByteArrayOutputStream().use { out ->
                 data.bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
@@ -310,32 +309,38 @@ class GlassesSession(
                 buf.rewind()
                 ByteArray(buf.remaining()).also { buf.get(it) }
             }
-            else -> return GlassesEvent.PhotoFailed("Unknown photo format: $data")
+            else -> return DeviceEvent.PhotoFailed("Unknown photo format: $data")
         }
         Log.i(TAG, "Photo received: ${bytes.size} bytes ($data)")
-        return GlassesEvent.PhotoTaken(bytes)
+        return DeviceEvent.PhotoTaken(bytes)
     }
 
+    override fun startScanning(fresh: Boolean) {
+        if (fresh) capturePhoto()
+    }
+
+    override fun stopScanning() = Unit
+
     /** On-screen stand-ins for the glasses buttons. In mock mode they go through the mock device. */
-    fun pressCapture() {
+    override fun pressCapture() {
         val mock = mockGlasses
         if (mock != null) {
             mock.services.input.capture(CapturePressType.SHORT_PRESS)
         } else {
-            _events.tryEmit(GlassesEvent.CapturePressed)
+            _events.tryEmit(DeviceEvent.CapturePressed)
         }
     }
 
-    fun pressAction() {
+    override fun pressAction() {
         val mock = mockGlasses
         if (mock != null) {
             mock.services.input.button(ButtonType.ACTION)
         } else {
-            _events.tryEmit(GlassesEvent.ActionPressed)
+            _events.tryEmit(DeviceEvent.ActionPressed)
         }
     }
 
-    fun disconnect() {
+    override fun disconnect() {
         photoJob?.cancel()
         photoJob = null
         jobs.forEach { it.cancel() }
