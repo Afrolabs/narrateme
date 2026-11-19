@@ -40,6 +40,14 @@ class NarrationPlayer {
         }
     }
 
+    fun pause() {
+        player?.let { if (it.isPlaying) it.pause() }
+    }
+
+    fun resume() {
+        player?.start()
+    }
+
     fun stop() {
         player?.let {
             runCatching { it.stop() }

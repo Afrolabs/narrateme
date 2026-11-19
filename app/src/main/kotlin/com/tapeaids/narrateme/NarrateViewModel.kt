@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.meta.wearable.dat.core.types.RegistrationState
 import com.tapeaids.narrateme.audio.NarrationPlayer
 import com.tapeaids.narrateme.audio.NarrationRecorder
+import com.tapeaids.narrateme.audio.PageTurnSound
 import com.tapeaids.narrateme.audio.Speaker
 import com.tapeaids.narrateme.core.Cue
 import com.tapeaids.narrateme.core.Effect
@@ -19,7 +20,10 @@ import com.tapeaids.narrateme.core.PageStore
 import com.tapeaids.narrateme.core.State
 import com.tapeaids.narrateme.core.pickMatch
 import com.tapeaids.narrateme.recognition.PageRecognizer
-import com.tapeaids.narrateme.glasses.GlassesEvent
+import com.tapeaids.narrateme.device.DeviceEvent
+import com.tapeaids.narrateme.device.DeviceKind
+import com.tapeaids.narrateme.device.NarrationDevice
+import com.tapeaids.narrateme.device.PhoneDevice
 import com.tapeaids.narrateme.glasses.GlassesSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,9 +45,10 @@ data class UiState(
     val lastMatch: String = "",
     val message: String = "",
     val useMock: Boolean = false,
+    val device: DeviceKind = DeviceKind.PHONE,
 )
 
-/** Wires the glasses, audio and storage to the narrate/listen state machine. */
+/** Wires the chosen device (phone or glasses), audio and storage to the narrate/listen state machine. */
 class NarrateViewModel(app: Application) : AndroidViewModel(app) {
     private val store = PageStore(File(app.filesDir, "pages"))
     private val controller = NarrationController()
@@ -51,35 +56,64 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
     private val recorder = NarrationRecorder(app)
     private val player = NarrationPlayer()
     private val speaker = Speaker(app)
+    private val pageTurn = PageTurnSound(app)
+
+    /** Live loudness while recording, for the waveform over the page. */
+    val levels get() = recorder.levels
+    val phone = PhoneDevice(app, viewModelScope)
     val glasses = GlassesSession(app, viewModelScope)
+    private val prefs = app.getSharedPreferences("narrateme", android.content.Context.MODE_PRIVATE)
+
+    /** The device whose camera, mic and buttons drive the loop. */
+    private val active: NarrationDevice
+        get() = if (_ui.value.device == DeviceKind.GLASSES) glasses else phone
 
     // Effects from successive inputs run strictly in order (e.g. a stop can't overtake a start).
     private val effectLock = Mutex()
 
-    private val _ui = MutableStateFlow(UiState())
+    private val _ui = MutableStateFlow(
+        UiState(
+            device = runCatching { DeviceKind.valueOf(prefs.getString(PREF_DEVICE, null) ?: "") }
+                .getOrDefault(DeviceKind.PHONE),
+        ),
+    )
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     val registration: StateFlow<RegistrationState> get() = glasses.registration
 
     init {
-        viewModelScope.launch {
-            glasses.events.collect { event ->
-                handle(
-                    when (event) {
-                        GlassesEvent.CapturePressed -> Input.CapturePressed
-                        GlassesEvent.ActionPressed -> Input.ActionPressed
-                        is GlassesEvent.PhotoTaken -> Input.PhotoTaken(event.bytes)
-                        is GlassesEvent.PhotoFailed -> Input.PhotoFailed(event.reason).also { say(it.reason) }
-                    },
-                )
+        for (device in listOf<NarrationDevice>(phone, glasses)) {
+            viewModelScope.launch {
+                device.events.collect { event ->
+                    // Only the chosen device drives the loop; the other one is ignored.
+                    if (device.kind != _ui.value.device) return@collect
+                    handle(
+                        when (event) {
+                            DeviceEvent.CapturePressed -> Input.CapturePressed
+                            DeviceEvent.ActionPressed -> Input.ActionPressed
+                            is DeviceEvent.PhotoTaken -> Input.PhotoTaken(event.bytes)
+                            is DeviceEvent.PhotoFailed -> Input.PhotoFailed(event.reason).also { say(it.reason) }
+                        },
+                    )
+                }
             }
         }
+        // The app opens on Listen; the Record narration screen switches to NARRATE.
+        setMode(Mode.LISTEN)
         viewModelScope.launch { refreshPages() }
     }
 
     fun setMode(mode: Mode) {
         controller.mode = mode
         publish()
+    }
+
+    /** Switches between the phone and the glasses. Only between interactions. */
+    fun setDevice(kind: DeviceKind) {
+        if (controller.state != State.Idle || kind == _ui.value.device) return
+        if (kind == DeviceKind.PHONE) glasses.disconnect()
+        prefs.edit().putString(PREF_DEVICE, kind.name).apply()
+        _ui.value = _ui.value.copy(device = kind, message = "")
     }
 
     fun setUseMock(enabled: Boolean) {
@@ -103,8 +137,22 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
 
     fun register(activity: Activity) = glasses.register(activity)
     fun connect() = glasses.connect()
-    fun pressCapture() = glasses.pressCapture()
-    fun pressAction() = glasses.pressAction()
+    fun pressCapture() = active.pressCapture()
+    fun pressAction() = active.pressAction()
+
+    /** A tap anywhere on the listen screen: pause or resume the narration. */
+    fun tapScreen() = handle(Input.ScreenTapped)
+
+    /** Starts listening, as if the capture button were pressed. */
+    fun startListening() {
+        setMode(Mode.LISTEN)
+        if (controller.state == State.Idle) handle(Input.CapturePressed)
+    }
+
+    /** Stops whatever listening is doing and goes back to idle. */
+    fun stopListening() {
+        if (controller.mode == Mode.LISTEN && controller.state != State.Idle) handle(Input.ActionPressed)
+    }
 
     /** Feeds one input to the controller and carries out its effects in order. */
     private fun handle(input: Input) {
@@ -120,15 +168,21 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
         when (effect) {
             Effect.TakePhoto -> {
                 say("Taking photo…")
-                glasses.capturePhoto()
+                active.capturePhoto()
             }
             Effect.StartRecording -> {
-                val error = withContext(Dispatchers.IO) { recorder.start(File(getApplication<Application>().cacheDir, "recording.wav")) }
+                val mic = active.mic
+                val error = withContext(Dispatchers.IO) {
+                    recorder.start(File(getApplication<Application>().cacheDir, "recording.wav"), mic)
+                }
                 if (error != null) {
                     say(error)
                     handle(Input.RecordingFailed(error))
                 } else {
-                    say("Recording… press the action button (or capture again) to stop")
+                    say(
+                        if (_ui.value.device == DeviceKind.GLASSES) "Recording… press the action button (or capture again) to stop"
+                        else "Recording… press Stop or volume down (or Capture again) to stop",
+                    )
                 }
             }
             is Effect.StopRecordingAndSave -> {
@@ -138,6 +192,15 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
                 say(if (saved != null) "Narration saved" else "Nothing was recorded")
                 refreshPages()
             }
+            is Effect.StartScanning -> {
+                active.startScanning(effect.fresh)
+                say(
+                    if (_ui.value.device == DeviceKind.GLASSES) "Press capture on the glasses to read a page"
+                    else "Hold the phone over a page",
+                )
+            }
+            Effect.StopScanning -> active.stopScanning()
+            Effect.PageTurnSound -> pageTurn.play()
             is Effect.FindPage -> {
                 say("Looking for the page…")
                 val pages = withContext(Dispatchers.IO) { store.list() }
@@ -166,6 +229,14 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
                         handle(Input.PlaybackFinished)
                     },
                 )
+            }
+            Effect.PausePlayback -> {
+                player.pause()
+                say("Paused. Tap to carry on")
+            }
+            Effect.ResumePlayback -> {
+                player.resume()
+                say("Playing narration")
             }
             Effect.StopPlayback -> {
                 player.stop()
@@ -202,7 +273,9 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
         recorder.stop()
         player.stop()
         speaker.release()
+        pageTurn.release()
         glasses.disconnect()
+        phone.disconnect()
     }
 
     private fun Cue.phrase() = when (this) {
@@ -212,9 +285,12 @@ class NarrateViewModel(app: Application) : AndroidViewModel(app) {
         Cue.NOT_RECOGNISED -> "Page not recognised"
         Cue.PHOTO_FAILED -> "Photo failed, please try again"
         Cue.RECORDING_FAILED -> "Recording failed"
+        Cue.LOOKING -> "Looking for a page"
+        Cue.STOPPED_LISTENING -> "Stopped listening"
     }
 
     private companion object {
         const val THUMB_PX = 300
+        const val PREF_DEVICE = "device"
     }
 }
