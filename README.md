@@ -13,8 +13,8 @@ This is a prototype. It stores any number of narrated pages and recognises which
 It's an Android app (Kotlin, Jetpack Compose). The glasses support uses Meta's [Wearables Device Access Toolkit](https://wearables.developer.meta.com/docs/develop/dat) 1.0.1, with Ray-Ban Meta or Oakley Meta glasses (no display needed).
 
 **Listen** (the main screen) is one full-screen **Listen to pages** button.
-- Tap it and hold the phone over a page. When the view holds steady on something with writing on it, the phone snaps a photo by itself, plays a page-turn sound and looks the page up.
-- A match says "Page recognised, starting narration" and reads it. Otherwise it says "Page not recognised" and keeps looking.
+- Tap it and hold the phone over a page. When the view holds steady on something with writing on it, the phone snaps a photo by itself and looks the page up.
+- A match plays a page-turn sound and reads the page. Otherwise it says "Page not recognised" and keeps looking. (Planned: after the page-turn sound, point one finger at a part of the page to hear it, or hold up two fingers for the whole page.)
 - When a narration ends it waits for the next page: turn the page, hold still, and it snaps again. The page it just read isn't snapped twice.
 - Tap anywhere to pause or carry on. Volume up skips to the page now in view. Back or volume down stops listening.
 

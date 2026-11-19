@@ -105,7 +105,7 @@ class NarrationControllerTest {
     }
 
     @Test
-    fun `listen starts scanning, then a snapped page is matched with a page-turn sound`() {
+    fun `listen starts scanning, then a snapped page is matched`() {
         val c = controller(Mode.LISTEN)
         assertEquals(
             listOf(Effect.Announce(Cue.LOOKING), Effect.StartScanning(fresh = true)),
@@ -113,17 +113,18 @@ class NarrationControllerTest {
         )
         assertEquals(State.Scanning, c.state)
         val effects = c.on(Input.PhotoTaken(photo))
-        assertEquals(listOf(Effect.StopScanning, Effect.PageTurnSound), effects.take(2))
-        assertSame(photo, (effects[2] as Effect.FindPage).photo)
+        assertEquals(Effect.StopScanning, effects[0])
+        assertSame(photo, (effects[1] as Effect.FindPage).photo)
+        assertEquals(2, effects.size)
         assertEquals(State.Matching, c.state)
     }
 
     @Test
-    fun `a recognised page is announced and read`() {
+    fun `a recognised page plays the page-turn sound, then is read`() {
         val c = controller(Mode.LISTEN)
         c.on(Input.CapturePressed)
         c.on(Input.PhotoTaken(photo))
-        assertEquals(listOf(Effect.Announce(Cue.RECOGNISED), Effect.Play(page)), c.on(Input.PageFound(page)))
+        assertEquals(listOf(Effect.PageTurnSound, Effect.Play(page)), c.on(Input.PageFound(page)))
         assertEquals(State.Playing(page), c.state)
     }
 

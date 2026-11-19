@@ -47,6 +47,7 @@ sealed interface Effect {
      */
     data class StartScanning(val fresh: Boolean) : Effect
     data object StopScanning : Effect
+    /** Played when a page is recognised. */
     data object PageTurnSound : Effect
 
     /** Look for the stored page this photo shows; answer with PageFound or PageNotFound. */
@@ -69,7 +70,8 @@ sealed interface Effect {
  *
  * Listen: capture starts listening. While scanning, a photo (snapped automatically
  * on the phone, or by a capture press on the glasses) is matched against the saved
- * pages; a match is read out, otherwise "not recognised" and back to scanning.
+ * pages; a match plays the page-turn sound and reads the page, otherwise "not
+ * recognised" and back to scanning.
  * When a narration ends it goes back to scanning for the next page. A screen tap
  * pauses or resumes; capture skips to the next page; action stops listening.
  *
@@ -123,7 +125,7 @@ class NarrationController {
                 }
             is Input.PhotoTaken -> {
                 photoInFlight = false
-                go(State.Matching, Effect.StopScanning, Effect.PageTurnSound, Effect.FindPage(input.bytes))
+                go(State.Matching, Effect.StopScanning, Effect.FindPage(input.bytes))
             }
             is Input.PhotoFailed -> {
                 photoInFlight = false
@@ -134,8 +136,10 @@ class NarrationController {
         }
 
         State.Matching -> when (input) {
+            // The page-turn sound means "got the page". Until pointing at blocks exists,
+            // the whole page plays straight after (what two fingers will do).
             is Input.PageFound ->
-                go(State.Playing(input.page), Effect.Announce(Cue.RECOGNISED), Effect.Play(input.page))
+                go(State.Playing(input.page), Effect.PageTurnSound, Effect.Play(input.page))
             Input.PageNotFound ->
                 go(State.Scanning, Effect.Announce(Cue.NOT_RECOGNISED), Effect.StartScanning(fresh = false))
             Input.ActionPressed -> stopListening()
